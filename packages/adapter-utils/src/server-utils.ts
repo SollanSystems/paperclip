@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants as fsConstants, promises as fs } from "node:fs";
+import { TextDecoder } from "node:util";
 import path from "node:path";
 
 export interface RunProcessResult {
@@ -32,6 +33,7 @@ export const runningProcesses = new Map<string, RunningProcess>();
 export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 export const MAX_EXCERPT_BYTES = 32 * 1024;
 const SENSITIVE_ENV_KEY = /(key|token|secret|password|passwd|authorization|cookie)/i;
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export function parseObject(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -66,7 +68,20 @@ export function parseJson(value: string): Record<string, unknown> | null {
 
 export function appendWithCap(prev: string, chunk: string, cap = MAX_CAPTURE_BYTES) {
   const combined = prev + chunk;
-  return combined.length > cap ? combined.slice(combined.length - cap) : combined;
+  const byteCap = Math.max(0, Math.floor(cap));
+  if (combined.length === 0 || byteCap === 0) return "";
+  if (Buffer.byteLength(combined, "utf8") <= byteCap) return combined;
+
+  let suffix = Buffer.from(combined, "utf8").slice(-byteCap);
+  while (suffix.length > 0) {
+    try {
+      return utf8Decoder.decode(suffix);
+    } catch {
+      suffix = suffix.slice(1);
+    }
+  }
+
+  return "";
 }
 
 export function resolvePathValue(obj: Record<string, unknown>, dottedPath: string) {

@@ -56,6 +56,7 @@ export function agentRoutes(db: Db) {
   const approvalsSvc = approvalService(db);
   const heartbeat = heartbeatService(db);
   const issueApprovalsSvc = issueApprovalService(db);
+  const issueSvc = issueService(db);
   const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
@@ -181,6 +182,14 @@ export function agentRoutes(db: Db) {
     if (typeof value !== "string") return null;
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : null;
+  }
+
+  function readContextId(context: Record<string, unknown>, keys: string[]): string | null {
+    for (const key of keys) {
+      const value = asNonEmptyString(context[key]);
+      if (value) return value;
+    }
+    return null;
   }
 
   function parseBooleanLike(value: unknown): boolean | null {
@@ -480,6 +489,44 @@ export function agentRoutes(db: Db) {
     }
     const chainOfCommand = await svc.getChainOfCommand(agent.id);
     res.json({ ...agent, chainOfCommand });
+  });
+
+  router.get("/agent/context", async (req, res) => {
+    if (req.actor.type !== "agent" || !req.actor.agentId) {
+      res.status(401).json({ error: "Agent authentication required" });
+      return;
+    }
+    const runId = req.actor.runId?.trim();
+    if (!runId) {
+      res.status(401).json({ error: "Missing agent run ID" });
+      return;
+    }
+
+    const run = await heartbeat.getRun(runId);
+    if (!run) {
+      res.status(404).json({ error: "Heartbeat run not found" });
+      return;
+    }
+    assertCompanyAccess(req, run.companyId);
+
+    const context = asRecord(run.contextSnapshot) ?? {};
+    const issueId = readContextId(context, ["issueId", "taskId"]);
+    const commentId = readContextId(context, ["wakeCommentId", "commentId"]);
+
+    const issue = issueId ? await issueSvc.getById(issueId) : null;
+    const wakeComment = commentId ? await issueSvc.getComment(commentId) : null;
+    const fallbackIssue =
+      !issue && wakeComment ? await issueSvc.getById(wakeComment.issueId) : null;
+
+    const resolvedIssue = issue ?? fallbackIssue;
+    res.json({
+      run,
+      issue: resolvedIssue && resolvedIssue.companyId === run.companyId ? resolvedIssue : null,
+      wakeComment:
+        wakeComment && wakeComment.issueId === (resolvedIssue?.id ?? issueId)
+          ? wakeComment
+          : null,
+    });
   });
 
   router.get("/agents/:id", async (req, res) => {

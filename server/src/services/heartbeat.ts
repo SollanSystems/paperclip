@@ -9,6 +9,8 @@ import {
   agentWakeupRequests,
   heartbeatRunEvents,
   heartbeatRuns,
+  costEvents,
+  issueComments,
   issues,
   projects,
   projectWorkspaces,
@@ -39,6 +41,7 @@ import {
   parseProjectExecutionWorkspacePolicy,
   resolveExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
+import { logActivity } from "./activity-log.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
@@ -358,6 +361,24 @@ function isSameTaskScope(left: string | null, right: string | null) {
 function truncateDisplayId(value: string | null | undefined, max = 128) {
   if (!value) return null;
   return value.length > max ? value.slice(0, max) : value;
+}
+
+function normalizeRunSummary(value: string | null | undefined) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export function buildFallbackIssueCommentForHeartbeatRun(input: {
+  outcome: "succeeded" | "failed" | "cancelled" | "timed_out";
+  summary: string | null | undefined;
+  existingAgentCommentCount: number;
+}) {
+  const summary = normalizeRunSummary(input.summary);
+  if (input.outcome !== "succeeded") return null;
+  if (!summary) return null;
+  if (input.existingAgentCommentCount > 0) return null;
+  return summary;
 }
 
 function normalizeAgentNameKey(value: string | null | undefined) {
@@ -1544,6 +1565,29 @@ export function heartbeatService(db: Db) {
             } as Record<string, unknown>)
           : null;
 
+      const runStartedAt = run.startedAt ?? startedAt;
+      const existingAgentCommentCount = issueId
+        ? await db
+            .select({ count: sql<number>`count(*)` })
+            .from(issueComments)
+            .where(
+              and(
+                eq(issueComments.companyId, agent.companyId),
+                eq(issueComments.issueId, issueId),
+                eq(issueComments.authorAgentId, agent.id),
+                gt(issueComments.createdAt, runStartedAt),
+              ),
+            )
+            .then((rows) => Number(rows[0]?.count ?? 0))
+        : 0;
+      const fallbackIssueCommentBody = issueId
+        ? buildFallbackIssueCommentForHeartbeatRun({
+            outcome,
+            summary: adapterResult.summary ?? null,
+            existingAgentCommentCount,
+          })
+        : null;
+
       await setRunStatus(run.id, status, {
         finishedAt: new Date(),
         error:
@@ -1615,6 +1659,45 @@ export function heartbeatService(db: Db) {
               sessionDisplayId: nextSessionState.displayId,
               lastRunId: finalizedRun.id,
               lastError: outcome === "succeeded" ? null : (adapterResult.errorMessage ?? "run_failed"),
+            });
+          }
+        }
+        if (issueId && fallbackIssueCommentBody) {
+          const autoComment = await db.transaction(async (tx) => {
+            const [comment] = await tx
+              .insert(issueComments)
+              .values({
+                companyId: agent.companyId,
+                issueId,
+                authorAgentId: agent.id,
+                authorUserId: null,
+                body: fallbackIssueCommentBody,
+              })
+              .returning();
+
+            await tx
+              .update(issues)
+              .set({ updatedAt: new Date() })
+              .where(and(eq(issues.companyId, agent.companyId), eq(issues.id, issueId)));
+
+            return comment ?? null;
+          });
+
+          if (autoComment) {
+            await logActivity(db, {
+              companyId: agent.companyId,
+              actorType: "agent",
+              actorId: agent.id,
+              agentId: agent.id,
+              runId: finalizedRun.id,
+              action: "issue.comment_added",
+              entityType: "issue",
+              entityId: issueId,
+              details: {
+                commentId: autoComment.id,
+                bodySnippet: autoComment.body.slice(0, 120),
+                source: "heartbeat_run_summary_fallback",
+              },
             });
           }
         }

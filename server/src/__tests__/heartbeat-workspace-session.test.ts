@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import {
+  buildFallbackIssueCommentForHeartbeatRun,
   resolveRuntimeSessionParamsForWorkspace,
   shouldResetTaskSessionForWake,
   type ResolvedWorkspaceForRun,
@@ -139,5 +140,45 @@ describe("shouldResetTaskSessionForWake", () => {
         wakeTriggerDetail: "callback",
       }),
     ).toBe(false);
+  });
+});
+
+describe("buildFallbackIssueCommentForHeartbeatRun", () => {
+  it("publishes the run summary when the run succeeded and no agent comment was posted", () => {
+    expect(
+      buildFallbackIssueCommentForHeartbeatRun({
+        outcome: "succeeded",
+        summary: "Completed the requested analysis.",
+        existingAgentCommentCount: 0,
+      }),
+    ).toBe("Completed the requested analysis.");
+  });
+
+  it("skips fallback posting when the agent already commented during the run", () => {
+    expect(
+      buildFallbackIssueCommentForHeartbeatRun({
+        outcome: "succeeded",
+        summary: "Completed the requested analysis.",
+        existingAgentCommentCount: 1,
+      }),
+    ).toBeNull();
+  });
+
+  it("skips fallback posting for empty or non-successful results", () => {
+    expect(
+      buildFallbackIssueCommentForHeartbeatRun({
+        outcome: "failed",
+        summary: "Completed the requested analysis.",
+        existingAgentCommentCount: 0,
+      }),
+    ).toBeNull();
+
+    expect(
+      buildFallbackIssueCommentForHeartbeatRun({
+        outcome: "succeeded",
+        summary: "   ",
+        existingAgentCommentCount: 0,
+      }),
+    ).toBeNull();
   });
 });
